@@ -490,7 +490,16 @@ function extractContent(
     return notionToMarkdown(contentMatch[1], title);
   }
 
-  // For databases or other structured responses, strip the preamble line.
+  // For databases, extract the SQL DDL as readable content.
+  const ddlMatch = text.match(/<sqlite-table>\n?([\s\S]*?)\n?<\/sqlite-table>/);
+  if (ddlMatch) {
+    const lines: string[] = [];
+    if (title) lines.push(`# ${title}`, "");
+    lines.push(ddlMatch[1].trim());
+    return lines.join("\n");
+  }
+
+  // For other structured responses, strip the preamble line.
   return text.replace(
     /^Here is the result of "[^"]*" for the \w+ with URL [^\n]+\n/,
     "",
@@ -515,6 +524,17 @@ export function parseFetchResult(result: McpResult): FetchedPage | null {
       if (typeof parsed === "object" && parsed !== null && "text" in parsed) {
         const markdown = extractContent(parsed.text, parsed.title);
         const { text: _text, ...metadata } = parsed;
+
+        // For databases, extract the data source ID for round-tripping.
+        if (parsed.metadata?.type === "database") {
+          const dsMatch = (parsed.text as string).match(
+            /<data-source url="{{(collection:\/\/[^}]+)}}"/,
+          );
+          if (dsMatch) {
+            metadata.data_source_id = dsMatch[1];
+          }
+        }
+
         return {
           title: parsed.title,
           url: parsed.url,
