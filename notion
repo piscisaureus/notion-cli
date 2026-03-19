@@ -1,0 +1,14 @@
+#!/bin/sh
+# Notion CLI entry point.
+# Resolves symlinks to find the real script directory.
+
+SOURCE="$0"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  case "$SOURCE" in /*) ;; *) SOURCE="$DIR/$SOURCE" ;; esac
+done
+SCRIPT_DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
+exec deno run --allow-net --allow-read --allow-write --allow-env --allow-run \
+  "$SCRIPT_DIR/src/main.ts" "$@"
