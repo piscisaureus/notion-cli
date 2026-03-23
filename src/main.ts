@@ -9,6 +9,9 @@
 import {
   extractMarkdownTitle,
   formatResult,
+  getTokenPath,
+  login,
+  logout,
   markdownToNotion,
   NotionClient,
   parseFetchResult,
@@ -1237,6 +1240,106 @@ Use 'notion tools --json' to see full parameter schemas.`);
   printResult(result);
 }
 
+// ─── Commands: auth ──────────────────────────────────────────────────
+
+async function cmdAuth(argv: string[]): Promise<void> {
+  const sub = argv[0];
+  const rest = argv.slice(1);
+
+  switch (sub) {
+    case "login":
+      return await cmdAuthLogin(rest);
+    case "logout":
+      return await cmdAuthLogout(rest);
+    case "status":
+      return await cmdAuthStatus(rest);
+    case "--help":
+    case "-h":
+    case undefined:
+      console.log(`Manage authentication.
+
+Usage: notion auth <subcommand>
+
+Subcommands:
+  login                Authenticate with Notion (opens browser)
+  logout               Remove stored credentials
+  status               Show current authentication status
+
+Run 'notion auth <subcommand> --help' for details.`);
+      return;
+    default:
+      die(
+        `unknown subcommand: auth ${sub}\nRun 'notion auth --help' for usage.`,
+      );
+  }
+}
+
+async function cmdAuthLogin(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  if (wantHelp(args)) {
+    console.log(`Authenticate with Notion via OAuth.
+
+Opens a browser window for you to authorize access to your
+Notion workspace. Tokens are saved to ${getTokenPath()}.
+
+Usage: notion auth login
+
+Options:
+  -h, --help           Show this help`);
+    return;
+  }
+  void args;
+  await login();
+}
+
+async function cmdAuthLogout(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  if (wantHelp(args)) {
+    console.log(`Remove stored Notion credentials.
+
+Usage: notion auth logout
+
+Options:
+  -h, --help           Show this help`);
+    return;
+  }
+  void args;
+  await logout();
+}
+
+async function cmdAuthStatus(argv: string[]): Promise<void> {
+  const args = parseArgs(argv);
+  if (wantHelp(args)) {
+    console.log(`Show current authentication status.
+
+Usage: notion auth status
+
+Options:
+  -h, --help           Show this help`);
+    return;
+  }
+  void args;
+
+  const path = getTokenPath();
+  try {
+    const tokens = JSON.parse(await Deno.readTextFile(path));
+    const expiresAt = new Date(tokens.expires_at * 1000);
+    const now = new Date();
+    const expired = expiresAt < now;
+    console.log(`Logged in`);
+    console.log(`  Token file: ${path}`);
+    console.log(
+      `  Token expires: ${expiresAt.toLocaleString()}${
+        expired ? " (expired, will refresh on next use)" : ""
+      }`,
+    );
+  } catch {
+    console.log(`Not logged in`);
+    console.log(`  No token file at ${path}`);
+    console.log(`  Run 'notion auth login' to authenticate.`);
+  }
+}
+
 // ─── Main ────────────────────────────────────────────────────────────
 
 const HELP = `Notion CLI - Access your Notion workspace from the command line.
@@ -1244,6 +1347,7 @@ const HELP = `Notion CLI - Access your Notion workspace from the command line.
 Usage: notion <command> [options]
 
 Commands:
+  auth                 Log in or out of Notion
   search               Search pages and databases
   get                  Fetch a page or database by ID or URL
   page                 Create, update, move, or duplicate pages
@@ -1276,6 +1380,8 @@ async function main(): Promise<void> {
 
   try {
     switch (cmd) {
+      case "auth":
+        return await cmdAuth(rest);
       case "search":
         return await cmdSearch(rest);
       case "get":

@@ -7,6 +7,8 @@
 
 const MCP_URL = "https://mcp.notion.com/mcp";
 const TOKEN_URL = "https://mcp.notion.com/token";
+const AUTHORIZE_URL = "https://mcp.notion.com/authorize";
+const REGISTER_URL = "https://mcp.notion.com/register";
 const CLIENT_ID = "6wAreBipt0Yz9WvQ";
 const PROTOCOL_VERSION = "2025-03-26";
 
@@ -16,9 +18,10 @@ interface Tokens {
   access_token: string;
   refresh_token: string;
   expires_at: number;
+  client_id?: string;
 }
 
-function getTokenPath(): string {
+export function getTokenPath(): string {
   const home = Deno.env.get("HOME") || Deno.env.get("USERPROFILE") || "";
   return `${home}/.notion/tokens.json`;
 }
@@ -30,7 +33,7 @@ async function readTokens(): Promise<Tokens> {
   } catch (e) {
     throw new Error(
       `Cannot read tokens from ${path}: ${e}\n` +
-        `Run 'npx mcp-remote https://mcp.notion.com/mcp' to authenticate.`,
+        `Run 'notion auth login' to authenticate.`,
     );
   }
 }
@@ -44,13 +47,14 @@ async function writeTokens(tokens: Tokens): Promise<void> {
 }
 
 async function refreshTokens(tokens: Tokens): Promise<Tokens> {
+  const clientId = tokens.client_id ?? CLIENT_ID;
   const resp = await fetch(TOKEN_URL, {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: tokens.refresh_token,
-      client_id: CLIENT_ID,
+      client_id: clientId,
     }),
   });
 
@@ -69,6 +73,7 @@ async function refreshTokens(tokens: Tokens): Promise<Tokens> {
     access_token: data.access_token,
     refresh_token: data.refresh_token,
     expires_at: now + (data.expires_in ?? 3600),
+    client_id: clientId,
   };
 }
 
@@ -83,6 +88,205 @@ async function getAccessToken(): Promise<string> {
   }
 
   return tokens.access_token;
+}
+
+// ─── OAuth login ─────────────────────────────────────────────────────
+
+function base64url(bytes: Uint8Array): string {
+  let s = "";
+  for (let i = 0; i < bytes.length; i++) {
+    s += String.fromCharCode(bytes[i]);
+  }
+  return btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function generateCodeVerifier(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  return base64url(bytes);
+}
+
+async function generateCodeChallenge(verifier: string): Promise<string> {
+  const hash = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(verifier),
+  );
+  return base64url(new Uint8Array(hash));
+}
+
+async function registerClient(redirectUri: string): Promise<string> {
+  const resp = await fetch(REGISTER_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      client_name: "notion-cli",
+      redirect_uris: [redirectUri],
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+      token_endpoint_auth_method: "none",
+    }),
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(
+      `Client registration failed (HTTP ${resp.status}): ${text}`,
+    );
+  }
+  const data = await resp.json();
+  if (!data.client_id) {
+    throw new Error(
+      `Client registration failed: ${JSON.stringify(data)}`,
+    );
+  }
+  return data.client_id as string;
+}
+
+const CALLBACK_HTML = `<!DOCTYPE html>
+<html><head><title>Notion CLI</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;justify-content:center;
+align-items:center;height:100vh;margin:0;background:#f7f7f7}
+.box{text-align:center;padding:2rem}</style></head>
+<body><div class="box"><h2>TITLE</h2><p>MSG</p></div></body></html>`;
+
+export async function login(): Promise<void> {
+  // Resolve the auth code from the OAuth callback via a promise.
+  let resolveCode!: (code: string) => void;
+  let rejectCode!: (err: Error) => void;
+  const codePromise = new Promise<string>((resolve, reject) => {
+    resolveCode = resolve;
+    rejectCode = reject;
+  });
+
+  const ac = new AbortController();
+  const server = Deno.serve({
+    port: 0,
+    signal: ac.signal,
+    onListen() {},
+  }, (req) => {
+    const url = new URL(req.url);
+    if (url.pathname !== "/callback") {
+      return new Response("Not found", { status: 404 });
+    }
+    const error = url.searchParams.get("error");
+    if (error) {
+      const desc = url.searchParams.get("error_description") || error;
+      rejectCode(new Error(`Authorization denied: ${desc}`));
+      const html = CALLBACK_HTML
+        .replace("TITLE", "Authorization Failed")
+        .replace("MSG", "You can close this tab.");
+      return new Response(html, {
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+    const code = url.searchParams.get("code");
+    if (code) {
+      resolveCode(code);
+      const html = CALLBACK_HTML
+        .replace("TITLE", "Authorized")
+        .replace("MSG", "You can close this tab.");
+      return new Response(html, {
+        headers: { "Content-Type": "text/html" },
+      });
+    }
+    return new Response("Missing code", { status: 400 });
+  });
+
+  try {
+    const port = server.addr.port;
+    const redirectUri = `http://127.0.0.1:${port}/callback`;
+
+    const clientId = await registerClient(redirectUri);
+
+    const codeVerifier = generateCodeVerifier();
+    const codeChallenge = await generateCodeChallenge(codeVerifier);
+
+    const authUrl = `${AUTHORIZE_URL}?${
+      new URLSearchParams({
+        client_id: clientId,
+        redirect_uri: redirectUri,
+        response_type: "code",
+        code_challenge: codeChallenge,
+        code_challenge_method: "S256",
+      })
+    }`;
+
+    // Try to open the browser.
+    const openCmd = Deno.build.os === "darwin"
+      ? "open"
+      : Deno.build.os === "windows"
+      ? "cmd"
+      : "xdg-open";
+    const openArgs = Deno.build.os === "windows"
+      ? ["/c", "start", authUrl]
+      : [authUrl];
+    try {
+      await new Deno.Command(openCmd, {
+        args: openArgs,
+        stderr: "null",
+        stdout: "null",
+      }).output();
+    } catch {
+      // Browser open failed; user can copy the URL.
+    }
+
+    console.log(`Open this URL to authorize:\n\n  ${authUrl}\n`);
+    console.log("Waiting for authorization...");
+
+    const code = await codePromise;
+
+    // Exchange authorization code for tokens.
+    const tokenResp = await fetch(TOKEN_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code,
+        redirect_uri: redirectUri,
+        client_id: clientId,
+        code_verifier: codeVerifier,
+      }),
+    });
+
+    if (!tokenResp.ok) {
+      const text = await tokenResp.text();
+      throw new Error(
+        `Token exchange failed (HTTP ${tokenResp.status}): ${text}`,
+      );
+    }
+
+    const data = await tokenResp.json();
+    if (!data.access_token) {
+      throw new Error(`Token exchange failed: ${JSON.stringify(data)}`);
+    }
+
+    const now = Math.floor(Date.now() / 1000);
+    const tokens: Tokens = {
+      access_token: data.access_token,
+      refresh_token: data.refresh_token,
+      expires_at: now + (data.expires_in ?? 3600),
+      client_id: clientId,
+    };
+
+    // Ensure ~/.notion/ directory exists.
+    const dir = getTokenPath().replace(/[/\\][^/\\]+$/, "");
+    await Deno.mkdir(dir, { recursive: true });
+
+    await writeTokens(tokens);
+    console.log("Authenticated successfully.");
+  } finally {
+    ac.abort();
+    await server.finished;
+  }
+}
+
+export async function logout(): Promise<void> {
+  const path = getTokenPath();
+  try {
+    await Deno.remove(path);
+    console.log(`Removed ${path}`);
+  } catch {
+    console.log("Already logged out (no tokens found).");
+  }
 }
 
 // ─── MCP protocol ────────────────────────────────────────────────────
