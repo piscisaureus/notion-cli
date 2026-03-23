@@ -659,9 +659,6 @@ async function cmdDb(argv: string[]): Promise<void> {
   const rest = argv.slice(1);
 
   switch (sub) {
-    case "list":
-    case "ls":
-      return await cmdDbList(rest);
     case "create":
       return await cmdDbCreate(rest);
     case "update":
@@ -676,10 +673,9 @@ async function cmdDb(argv: string[]): Promise<void> {
 Usage: notion db <subcommand> [options]
 
 Subcommands:
-  list                 List database rows as CSV
   create               Create a new database
   update               Update a database's schema or properties
-  query                Query a database (MCP, if available)
+  query                Query a database
 
 Run 'notion db <subcommand> --help' for details.`);
       return;
@@ -688,66 +684,6 @@ Run 'notion db <subcommand> --help' for details.`);
         `unknown subcommand: db ${sub}\nRun 'notion db --help' for usage.`,
       );
   }
-}
-
-async function cmdDbList(argv: string[]): Promise<void> {
-  const args = parseArgs(argv);
-  if (wantHelp(args)) {
-    console.log(`List database rows as CSV.
-
-Usage: notion db list <id-or-url> [options]
-
-Arguments:
-  <id-or-url>          Database ID or URL
-
-Options:
-  --columns <cols>     Comma-separated column names to include
-                       (default: all columns)
-  --sort <prop>        Property to sort by (default: first column)
-  --desc               Sort descending (default: ascending)
-  -h, --help           Show this help
-
-Requires the Notion REST API token (NOTION_API_TOKEN or .env.sh).
-The integration must be connected to the database in Notion.
-
-Examples:
-  notion db list abc123
-  notion db list abc123 --columns "Name,Date"
-  notion db list abc123 --sort Date --desc`);
-    return;
-  }
-
-  const { queryDatabase, formatCsv } = await import("./rest.ts");
-
-  const id = extractId(requirePos(args, 0, "id-or-url"));
-  const columnsOpt = opt(args, "columns");
-  const sortProp = opt(args, "sort");
-  const desc = flag(args, "desc");
-
-  const sorts = sortProp
-    ? [{
-      property: sortProp,
-      direction: desc ? "descending" as const : "ascending" as const,
-    }]
-    : undefined;
-
-  const { schema, rows } = await queryDatabase(id, sorts);
-
-  // Determine columns to show.
-  let columns: string[];
-  if (columnsOpt) {
-    columns = columnsOpt.split(",").map((c) => c.trim());
-  } else {
-    // Default: all columns, title first.
-    const titleCol = Object.entries(schema.properties)
-      .find(([_, v]) => v.type === "title")?.[0];
-    columns = Object.keys(schema.properties);
-    if (titleCol) {
-      columns = [titleCol, ...columns.filter((c) => c !== titleCol)];
-    }
-  }
-
-  console.log(formatCsv(columns, rows));
 }
 
 async function cmdDbCreate(argv: string[]): Promise<void> {
