@@ -557,7 +557,7 @@ function notionToMarkdown(mcpText: string, title?: string): string {
  */
 // A line that starts a new block (not a paragraph continuation).
 const BLOCK_START_RE =
-  /^(\s*```|#{1,6}\s|[-*+]\s|\d+\.\s|>\s|<[a-z_]|<\/|<empty-block\/>|\|)/;
+  /^(\s*```|\s*#{1,6}\s|\s*[-*+]\s|\s*\d+\.\s|\s*>\s|<[a-z_]|<\/|<empty-block\/>|\|)/;
 
 /** Strip a leading URL line (from `notion get` output) if present. */
 function stripLeadingUrl(markdown: string): string {
@@ -610,7 +610,8 @@ export function markdownToNotion(markdown: string): string {
     const prevIsPlain = prev !== "" && !BLOCK_START_RE.test(prev) &&
       !prev.trimStart().startsWith("```");
     const prevIsList = LIST_RE.test(prev);
-    const isIndentedContinuation = /^\s+/.test(line);
+    const isIndentedContinuation = /^\s+/.test(line) &&
+      !LIST_RE.test(line.trimStart());
 
     if (
       unwrapped.length > 0 &&
