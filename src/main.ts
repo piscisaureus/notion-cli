@@ -487,9 +487,9 @@ Content options (replace entire page content):
   --content-file <f>   Read content from a file
   --stdin              Read content from stdin
 
-Partial content options:
+Partial content options (search-and-replace):
+  --replace <old>      Find <old> in the page and replace with new content
   --insert-after <a>   Insert content after the text anchor <a>
-  --replace-range <a>  Replace content matching the text anchor <a>
 
 Property options (can be combined with each other):
   --title <text>       Update the page title
@@ -508,6 +508,7 @@ Examples:
   notion page update abc123 --title "New" --icon "🚀"
   notion page update abc123 --content "# Updated content"
   cat page.md | notion page update abc123 --stdin
+  notion page update abc123 --replace "old text" --content "new text"
   notion page update abc123 --insert-after "## Section" --content "New text"`);
     return;
   }
@@ -516,14 +517,32 @@ Examples:
   const c = await client();
 
   const title = opt(args, "title");
+  const replaceOld = opt(args, "replace");
   const insertAfter = opt(args, "insert-after");
-  const replaceRange = opt(args, "replace-range");
   const properties = opt(args, "properties");
   const icon = opt(args, "icon");
   const cover = opt(args, "cover");
   const content = await getContent(args);
 
-  // Handle partial content updates.
+  // Handle partial content updates (update_content command with
+  // content_updates array of {old_str, new_str} operations).
+  if (replaceOld) {
+    if (!content) {
+      die(
+        "--replace requires content (--content, --content-file, or --stdin)",
+      );
+    }
+    const result = await c.call("notion-update-page", {
+      page_id: pageId,
+      command: "update_content",
+      content_updates: [{
+        old_str: replaceOld,
+        new_str: markdownToNotion(content),
+      }],
+    });
+    printResult(result);
+    return;
+  }
   if (insertAfter) {
     if (!content) {
       die(
@@ -532,24 +551,11 @@ Examples:
     }
     const result = await c.call("notion-update-page", {
       page_id: pageId,
-      command: "insert_content_after",
-      selection_with_ellipsis: insertAfter,
-      new_str: markdownToNotion(content),
-    });
-    printResult(result);
-    return;
-  }
-  if (replaceRange) {
-    if (!content) {
-      die(
-        "--replace-range requires content (--content, --content-file, or --stdin)",
-      );
-    }
-    const result = await c.call("notion-update-page", {
-      page_id: pageId,
-      command: "replace_content_range",
-      selection_with_ellipsis: replaceRange,
-      new_str: markdownToNotion(content),
+      command: "update_content",
+      content_updates: [{
+        old_str: insertAfter,
+        new_str: insertAfter + "\n" + markdownToNotion(content),
+      }],
     });
     printResult(result);
     return;
@@ -663,8 +669,6 @@ async function cmdDb(argv: string[]): Promise<void> {
       return await cmdDbCreate(rest);
     case "update":
       return await cmdDbUpdate(rest);
-    case "query":
-      return await cmdDbQuery(rest);
     case "--help":
     case "-h":
     case undefined:
@@ -675,7 +679,6 @@ Usage: notion db <subcommand> [options]
 Subcommands:
   create               Create a new database
   update               Update a database's schema or properties
-  query                Query a database
 
 Run 'notion db <subcommand> --help' for details.`);
       return;
@@ -752,60 +755,6 @@ Examples:
   printResult(result);
 }
 
-async function cmdDbQuery(argv: string[]): Promise<void> {
-  const args = parseArgs(argv);
-  if (wantHelp(args)) {
-    console.log(`Query a Notion database.
-
-Usage: notion db query <id>... [options]
-
-Arguments:
-  <id>...              One or more database/data source IDs
-
-Options:
-  --filter <json>      Filter expression (JSON)
-  --sort <json>        Sort expression (JSON)
-  --limit <n>          Maximum number of results
-  -h, --help           Show this help
-
-Examples:
-  notion db query abc123
-  notion db query abc123 --limit 20
-  notion db query abc123 --filter '{"property":"Status","equals":"Done"}'`);
-    return;
-  }
-
-  const ids = args._ as string[];
-  if (ids.length === 0) die("provide at least one database ID");
-
-  const filter = opt(args, "filter");
-  const sort = opt(args, "sort");
-  const limit = opt(args, "limit");
-
-  const mcpArgs: Record<string, unknown> = {
-    data_source_ids: ids,
-  };
-  if (filter) {
-    try {
-      mcpArgs.filter = JSON.parse(filter);
-    } catch {
-      die("--filter must be valid JSON");
-    }
-  }
-  if (sort) {
-    try {
-      mcpArgs.sort = JSON.parse(sort);
-    } catch {
-      die("--sort must be valid JSON");
-    }
-  }
-  if (limit) mcpArgs.limit = parseInt(limit);
-
-  const c = await client();
-  const result = await c.call("notion-query-data-sources", mcpArgs);
-  printResult(result);
-}
-
 // ─── Commands: view ──────────────────────────────────────────────────
 
 async function cmdView(argv: string[]): Promise<void> {
@@ -842,31 +791,43 @@ async function cmdViewCreate(argv: string[]): Promise<void> {
   if (wantHelp(args)) {
     console.log(`Create a new database view.
 
-Usage: notion view create --db <id> --type <type> --name <name>
+Usage: notion view create --db <id> --ds <data-source-id> --type <type> --name <name>
 
 Options:
-  --db <id>            Database ID (required)
+  --db <id>            Database ID or URL (required)
+  --ds <id>            Data source ID (required, from 'notion get <db>')
   --type <type>        View type (required): table, board, list, calendar,
                        timeline, gallery, form, chart, map, dashboard
   --name <name>        View name (required)
+  --configure <dsl>    View configuration DSL (filters, sorts, etc.)
   -h, --help           Show this help
 
+Use 'notion get <database>' to find the data source ID (shown in
+<data-source url="collection://..."> tags).
+
 Examples:
-  notion view create --db abc123 --type board --name "Kanban"
-  notion view create --db abc123 --type calendar --name "Schedule"`);
+  notion view create --db abc123 --ds def456 --type board --name "Kanban"
+  notion view create --db abc123 --ds def456 --type table --name "Active" \\
+    --configure 'FILTER "Status" = "In Progress"; SORT BY "Due" ASC'`);
     return;
   }
 
   const dbId = extractId(requireOpt(args, "db"));
+  const dsId = requireOpt(args, "ds");
   const type = requireOpt(args, "type");
   const name = requireOpt(args, "name");
+  const configure = opt(args, "configure");
 
-  const c = await client();
-  const result = await c.call("notion-create-view", {
+  const mcpArgs: Record<string, unknown> = {
     database_id: dbId,
+    data_source_id: dsId,
     type,
     name,
-  });
+  };
+  if (configure) mcpArgs.configure = configure;
+
+  const c = await client();
+  const result = await c.call("notion-create-view", mcpArgs);
   printResult(result);
 }
 
@@ -878,42 +839,28 @@ async function cmdViewUpdate(argv: string[]): Promise<void> {
 Usage: notion view update <id> [options]
 
 Arguments:
-  <id>                 View ID
+  <id>                 View ID (from 'notion get <db>')
 
 Options:
   --name <name>        New view name
-  --filter <json>      Filter configuration (JSON)
-  --sort <json>        Sort configuration (JSON)
+  --configure <dsl>    View configuration DSL (filters, sorts, etc.)
   -h, --help           Show this help
 
 Examples:
   notion view update abc123 --name "Active Tasks"
-  notion view update abc123 --filter '{"property":"Status","equals":"Active"}'`);
+  notion view update abc123 --configure 'FILTER "Status" = "Done"'
+  notion view update abc123 --configure 'CLEAR FILTER; SORT BY "Created" DESC'`);
     return;
   }
 
-  const id = extractId(requirePos(args, 0, "id"));
+  const id = requirePos(args, 0, "id");
   const mcpArgs: Record<string, unknown> = { view_id: id };
 
   const name = opt(args, "name");
-  const filter = opt(args, "filter");
-  const sort = opt(args, "sort");
+  const configure = opt(args, "configure");
 
   if (name) mcpArgs.name = name;
-  if (filter) {
-    try {
-      mcpArgs.filter = JSON.parse(filter);
-    } catch {
-      die("--filter must be valid JSON");
-    }
-  }
-  if (sort) {
-    try {
-      mcpArgs.sort = JSON.parse(sort);
-    } catch {
-      die("--sort must be valid JSON");
-    }
-  }
+  if (configure) mcpArgs.configure = configure;
 
   const c = await client();
   const result = await c.call("notion-update-view", mcpArgs);

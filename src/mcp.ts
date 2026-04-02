@@ -200,15 +200,13 @@ export async function login(): Promise<void> {
     const codeVerifier = generateCodeVerifier();
     const codeChallenge = await generateCodeChallenge(codeVerifier);
 
-    const authUrl = `${AUTHORIZE_URL}?${
-      new URLSearchParams({
-        client_id: clientId,
-        redirect_uri: redirectUri,
-        response_type: "code",
-        code_challenge: codeChallenge,
-        code_challenge_method: "S256",
-      })
-    }`;
+    const authUrl = `${AUTHORIZE_URL}?${new URLSearchParams({
+      client_id: clientId,
+      redirect_uri: redirectUri,
+      response_type: "code",
+      code_challenge: codeChallenge,
+      code_challenge_method: "S256",
+    })}`;
 
     // Try to open the browser.
     const openCmd = Deno.build.os === "darwin"
@@ -561,16 +559,22 @@ function notionToMarkdown(mcpText: string, title?: string): string {
 const BLOCK_START_RE =
   /^(\s*```|#{1,6}\s|[-*+]\s|\d+\.\s|>\s|<[a-z_]|<\/|<empty-block\/>|\|)/;
 
+/** Strip a leading URL line (from `notion get` output) if present. */
+function stripLeadingUrl(markdown: string): string {
+  return markdown.replace(/^https?:\/\/[^\n]*\n\n?/, "");
+}
+
 /** Extract the title from a `# Title` heading at the start of markdown. */
 export function extractMarkdownTitle(markdown: string): string | undefined {
-  const m = markdown.match(/^# ([^\n]+)/);
+  const cleaned = stripLeadingUrl(markdown);
+  const m = cleaned.match(/^# ([^\n]+)/);
   return m ? m[1].trim() : undefined;
 }
 
 export function markdownToNotion(markdown: string): string {
-  // Strip leading title heading (and the newline after it, but NOT the
-  // blank-line separator -- that participates in empty-block counting).
-  const text = markdown.replace(/^# [^\n]+\n/, "");
+  // Strip leading URL line (from `notion get` output) and title heading.
+  const withoutUrl = stripLeadingUrl(markdown);
+  const text = withoutUrl.replace(/^# [^\n]+\n/, "");
 
   // Phase 1: unwrap soft-wrapped paragraphs.
   // Join consecutive plain-text lines into single lines. A line ending
@@ -769,9 +773,8 @@ export function formatResult(result: McpResult, json = false): string {
           if (
             typeof parsed === "object" && parsed !== null && "text" in parsed
           ) {
-            const url = parsed.url ?? "";
             const cleaned = extractContent(parsed.text, parsed.title);
-            parts.push(url ? `${url}\n\n${cleaned}` : cleaned);
+            parts.push(cleaned);
           } else {
             parts.push(JSON.stringify(parsed, null, 2));
           }
