@@ -24,6 +24,33 @@
  *   even inside inline code. There is no known escape that prevents
  *   this. (`\<br\>` shows literally with backslashes visible.)
  *
+ * ### Why `$` is special
+ *
+ * Notion uses `$...$` as inline equation (LaTeX) delimiters. This is
+ * why `$` needs escaping in the MCP format -- `$10` would be parsed
+ * as the start of an equation, not a dollar amount. The Notion web
+ * client's own markdown serializer emits `$` only when an equation
+ * annotation is present on the text; it does NOT escape bare `$` in
+ * body text. The MCP server adds the `\$` escaping itself.
+ *
+ * ### Backslash handling
+ *
+ * The Notion web client's markdown paste handler (Cmd+Shift+V)
+ * doubles all backslashes before passing to markdown-it:
+ *   `text.replace(/\\/g, "\\\\")`
+ * This means `\*` in pasted markdown becomes `\\*`, which markdown-it
+ * renders as a literal backslash followed by `*`. The MCP server
+ * likely uses the same markdown-it pipeline for `replace_content`,
+ * which explains why:
+ *   - `\$` sent via MCP input is stored as literal `\$` (backslash
+ *     visible), not as an escaped dollar sign.
+ *   - `\*` sent via MCP input is stored as literal `\*`, not as an
+ *     escaped asterisk.
+ * Our workaround: unescape on export, re-escape `$` (but not `*`)
+ * on import. The server handles raw `$` correctly (escapes it
+ * internally), and raw `*` is interpreted as markdown formatting
+ * which is the desired behavior.
+ *
  * ### Escaping edge case: `\*` adjacent to bold markers
  *
  * - MCP output: `**text-\***` (bold text ending with literal `*`)
@@ -39,6 +66,19 @@
  * - Code blocks inside list items have tab-indented fences but
  *   unindented content. We must indent content on export (for
  *   editor/prettier compatibility) and strip on import.
+ *
+ * ### Notion client markdown format vs MCP format
+ *
+ * The Notion web client (clipboard copy) and MCP server produce
+ * different markdown for some block types:
+ *   - Callouts: client uses `<aside>`, MCP uses `<callout>` with
+ *     icon/color attributes.
+ *   - Links: client deduplicates `[url](url)` -> bare `url`.
+ *   - Code languages: MCP expands aliases (`tsx` -> `typescript`).
+ *   - List indentation: client uses 4 spaces, MCP uses tabs.
+ *   - Special characters: client does NOT escape `$`, `*`, etc. in
+ *     body text (formatting is annotation-driven). MCP does escape.
+ * Our transforms target the MCP format, not the client format.
  *
  * ### Content that doesn't survive round-trip (server-side)
  *
