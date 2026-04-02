@@ -489,6 +489,7 @@ Content options (replace entire page content):
 
 Partial content options (search-and-replace):
   --replace <old>      Find <old> in the page and replace with new content
+                       (alias: --replace-range)
   --insert-after <a>   Insert content after the text anchor <a>
 
 Property options (can be combined with each other):
@@ -517,7 +518,7 @@ Examples:
   const c = await client();
 
   const title = opt(args, "title");
-  const replaceOld = opt(args, "replace");
+  const replaceOld = opt(args, "replace") ?? opt(args, "replace-range");
   const insertAfter = opt(args, "insert-after");
   const properties = opt(args, "properties");
   const icon = opt(args, "icon");
