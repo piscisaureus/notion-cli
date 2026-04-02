@@ -80,12 +80,71 @@
  *     body text (formatting is annotation-driven). MCP does escape.
  * Our transforms target the MCP format, not the client format.
  *
+ * ### Backslash escapes supported by the MCP server on input
+ *
+ * Tested empirically by sending `\X` and checking what Notion stored:
+ *   - `\*` -> literal `*` (works, stored as `\*` in MCP output)
+ *   - `\#` -> literal `#` (works, but backslash is consumed -- NOT
+ *     in MCP output)
+ *   - `\-` -> literal `-` (same: consumed, not in output)
+ *   - `\>` -> literal `>` (stored as `\>` in MCP output)
+ *   - `\[`, `\]` -> literal brackets (stored as `\[`, `\]`)
+ *   - `\|` -> literal pipe (stored as `\|`)
+ *   - `\~` -> literal tilde (stored as `\~`)
+ *   - `\_` -> does NOT prevent italic (underscore italic still works)
+ *   - `\\` -> single `\` (stored as `\\\\` in MCP output -- quad!)
+ *   - `\$` on input -> stored as literal `\$` (backslash visible),
+ *     NOT as an escaped dollar. Our CLI sends raw `$` instead.
+ *
+ * ### Equations
+ *
+ * Raw `$...$` on input creates inline equations (LaTeX rendered).
+ * `$$..$$` also creates inline equations (NOT block equations).
+ * `$10` alone does NOT trigger equation mode (no closing `$`).
+ * Equations in MCP output appear as: `$\`latex content\`$`
+ *
+ * ### Numbered lists
+ *
+ * The server auto-renumbers: `1. 1. 1.` becomes `1. 2. 3.` and
+ * `5. 6. 7.` continues from the previous list (`4. 5. 6.`).
+ *
+ * ### Tables
+ *
+ * Markdown pipe tables (`| a | b |`) are converted to Notion's
+ * `<table>` / `<tr>` / `<td>` HTML-like format in MCP output.
+ * They do NOT round-trip as pipe syntax.
+ *
+ * ### Tags recognized by MCP server
+ *
+ * Valid: `<callout>`, `<video>`, `<image>`, `<database>`,
+ *   `<table>`, `<tr>`, `<td>`, `<br>`, `<empty-block/>`,
+ *   `<span>` (with discussion-urls), `<table_of_contents>`,
+ *   `<mention-page>`
+ * NOT valid (stored as literal text with escaped brackets):
+ *   `<toggle>`, `<quote>`, `<aside>`
+ *
+ * ### Deep nesting
+ *
+ * Nesting uses tab indentation in MCP format:
+ *   Level 1: `1. item`
+ *   Level 2: `\t- sub-item`
+ *   Level 3: `\t\t- sub-sub-item`
+ *
+ * ### Caret escaping
+ *
+ * The `^` character is escaped by the server (stored as `\^`).
+ * This is likely because `^` has meaning in superscript context.
+ *
  * ### Content that doesn't survive round-trip (server-side)
  *
  * - Trailing whitespace in table cells is stripped by the server.
  * - Signed S3 image URLs expire between fetch and re-upload.
  * - `<empty-block/>` may be lost if editor collapses blank lines.
  * - Whitespace-only lines are stripped by the server.
+ * - Double-backtick inline code (`` ``code`` ``) may be mangled.
+ * - Tab indentation outside list items is stripped.
+ * - `<br>` inside inline code is interpreted as line break (no
+ *   known workaround).
  */
 
 import { assertEquals } from "@std/assert";
@@ -612,5 +671,153 @@ Deno.test(
       "# T\n\n| a | b |\n|---|---|\n| 1 | 2 |",
     );
     assertEquals(result, "| a | b |\n|---|---|\n| 1 | 2 |");
+  },
+);
+
+// ─── Findings from edge case test pages ──────────────────────────────
+// These tests document behaviors observed by uploading content to Notion
+// and re-fetching the raw MCP output.
+
+Deno.test(
+  "deep nesting: three levels use multiple tabs",
+  () => {
+    // MCP output uses \t per nesting level. Our markdownToNotion should
+    // preserve indented sub-items.
+    const result = markdownToNotion(
+      "# T\n\n1. Level 1\n   - Level 2a\n      - Level 3a\n      - Level 3b\n   - Level 2b\n2. Back to level 1",
+    );
+    assertEquals(
+      result,
+      "1. Level 1\n   - Level 2a\n      - Level 3a\n      - Level 3b\n   - Level 2b\n2. Back to level 1",
+    );
+  },
+);
+
+Deno.test(
+  "checkboxes: to-do items are preserved",
+  () => {
+    const result = markdownToNotion(
+      "# T\n\n- [ ] Unchecked\n- [x] Checked\n- [ ] Another",
+    );
+    assertEquals(result, "- [ ] Unchecked\n- [x] Checked\n- [ ] Another");
+  },
+);
+
+Deno.test(
+  "horizontal rules: --- passes through",
+  () => {
+    const result = markdownToNotion("# T\n\nAbove\n\n---\n\nBelow");
+    assertEquals(result, "Above\n---\nBelow");
+  },
+);
+
+Deno.test(
+  "horizontal rules: *** passes through",
+  () => {
+    const result = markdownToNotion("# T\n\nAbove\n\n***\n\nBelow");
+    assertEquals(result, "Above\n***\nBelow");
+  },
+);
+
+Deno.test(
+  "images: markdown image syntax preserved",
+  () => {
+    const result = markdownToNotion(
+      "# T\n\n![Alt text](https://example.com/img.png)",
+    );
+    assertEquals(result, "![Alt text](https://example.com/img.png)");
+  },
+);
+
+Deno.test(
+  "consecutive code blocks stay separate",
+  () => {
+    const result = markdownToNotion(
+      "# T\n\n```javascript\nconst a = 1;\n```\n\n```python\nb = 2\n```",
+    );
+    assertEquals(
+      result,
+      "```javascript\nconst a = 1;\n```\n```python\nb = 2\n```",
+    );
+  },
+);
+
+Deno.test(
+  "inline code at different positions in a line",
+  () => {
+    const r1 = markdownToNotion("# T\n\n`code at start` of line");
+    assertEquals(r1, "`code at start` of line");
+
+    const r2 = markdownToNotion("# T\n\nEnd with `code at end`");
+    assertEquals(r2, "End with `code at end`");
+
+    const r3 = markdownToNotion("# T\n\n`entire line is code`");
+    assertEquals(r3, "`entire line is code`");
+  },
+);
+
+Deno.test(
+  "links with special characters in URL",
+  () => {
+    const result = markdownToNotion(
+      "# T\n\n[Link](https://example.com/path?cost=$10)",
+    );
+    // $ inside a markdown link URL should still be escaped
+    assertEquals(
+      result,
+      "[Link](https://example.com/path?cost=\\$10)",
+    );
+  },
+);
+
+Deno.test(
+  "links with parens in URL (wikipedia style)",
+  () => {
+    const result = markdownToNotion(
+      "# T\n\n[Link](https://en.wikipedia.org/wiki/Foo_(bar))",
+    );
+    assertEquals(
+      result,
+      "[Link](https://en.wikipedia.org/wiki/Foo_(bar))",
+    );
+  },
+);
+
+Deno.test(
+  "mixed block types without blank lines",
+  () => {
+    const result = markdownToNotion(
+      "# T\n\nParagraph before list:\n- item one\n- item two\nParagraph after list.",
+    );
+    // List items should not be joined with surrounding paragraphs
+    assertEquals(
+      result,
+      "Paragraph before list:\n- item one\n- item two\nParagraph after list.",
+    );
+  },
+);
+
+Deno.test(
+  "dollar in equation context is escaped to prevent LaTeX",
+  () => {
+    // Raw $...$ creates equations in Notion. Our escaping prevents this.
+    const result = markdownToNotion("# T\n\n$x^2 + y^2 = z^2$");
+    assertEquals(result, "\\$x^2 + y^2 = z^2\\$");
+  },
+);
+
+Deno.test(
+  "multiple dollar signs all escaped",
+  () => {
+    const result = markdownToNotion("# T\n\n$foo and $bar");
+    assertEquals(result, "\\$foo and \\$bar");
+  },
+);
+
+Deno.test(
+  "dollar at start of line is escaped",
+  () => {
+    const result = markdownToNotion("# T\n\n$PATH is important");
+    assertEquals(result, "\\$PATH is important");
   },
 );
