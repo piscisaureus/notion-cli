@@ -333,9 +333,11 @@ export interface McpResult {
 
 export class NotionClient {
   #accessToken: string;
-  #sessionId: string;
+  // Undefined when the server runs statelessly and issues no session ID;
+  // the header must then be omitted from subsequent requests.
+  #sessionId: string | undefined;
 
-  private constructor(accessToken: string, sessionId: string) {
+  private constructor(accessToken: string, sessionId: string | undefined) {
     this.#accessToken = accessToken;
     this.#sessionId = sessionId;
   }
@@ -359,12 +361,22 @@ export class NotionClient {
       }),
     });
 
-    const sessionId = initResp.headers.get("mcp-session-id");
-    await initResp.text(); // Consume body.
+    // The session ID is optional: servers MAY assign one at initialize
+    // time, and stateless servers omit it entirely.
+    const sessionId = initResp.headers.get("mcp-session-id") ?? undefined;
+    const initBody = await initResp.text();
 
-    if (!sessionId) {
+    if (!initResp.ok) {
       throw new Error(
-        "Failed to get MCP session ID. Check your tokens and network.",
+        `MCP initialize failed (HTTP ${initResp.status}): ${initBody}`,
+      );
+    }
+
+    const initData = parseSSE(initBody);
+    if (initData.error) {
+      const err = initData.error as Record<string, unknown>;
+      throw new Error(
+        `MCP initialize failed: ${err.message ?? JSON.stringify(err)}`,
       );
     }
 
